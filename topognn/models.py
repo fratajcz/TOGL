@@ -12,7 +12,7 @@ from torch_geometric.data import Data
 
 from topognn import Tasks
 from topognn.cli_utils import str2bool, int_or_none
-from topognn.layers import GCNLayer, GINLayer, GATLayer, SimpleSetTopoLayer, fake_persistence_computation#, EdgeDropout
+from topognn.layers import GCNLayer, GINLayer, GATLayer, SimpleSetTopoLayer, fake_persistence_computation
 from topognn.metrics import WeightedAccuracy
 from topognn.data_utils import remove_duplicate_edges
 from torch_persistent_homology.persistent_homology_cpu import compute_persistence_homology_batched_mt
@@ -24,11 +24,12 @@ import wandb
 
 from sklearn.metrics import roc_auc_score
 
+
 class TopologyLayer(torch.nn.Module):
     """Topological Aggregation Layer."""
 
-    def __init__(self, features_in, features_out, num_filtrations,
-                 num_coord_funs, filtration_hidden, num_coord_funs1=None,
+    def __init__(self, features_in, features_out, num_filtrations=8,
+                 num_coord_funs=3, filtration_hidden=24, num_coord_funs1=3,
                  dim1=False, residual_and_bn=False,
                  share_filtration_parameters=False, fake=False,
                  tanh_filtrations=False, swap_bn_order=False, dist_dim1=False):
@@ -38,13 +39,18 @@ class TopologyLayer(torch.nn.Module):
         """
         super().__init__()
 
+        self.num_coord_funs = {"Triangle_transform": num_coord_funs,
+                               "Gaussian_transform": num_coord_funs,
+                               "Line_transform": num_coord_funs,
+                               "RationalHat_transform": num_coord_funs
+                               }
+
         self.dim1 = dim1
 
         self.features_in = features_in
         self.features_out = features_out
 
         self.num_filtrations = num_filtrations
-        self.num_coord_funs = num_coord_funs
 
         self.filtration_hidden = filtration_hidden
         self.residual_and_bn = residual_and_bn
@@ -62,10 +68,14 @@ class TopologyLayer(torch.nn.Module):
         ])
 
         if self.dim1:
-            assert num_coord_funs1 is not None
+            coord_funs1 = {"Triangle_transform": num_coord_funs1,
+                           "Gaussian_transform": num_coord_funs1,
+                           "Line_transform": num_coord_funs1,
+                           "RationalHat_transform": num_coord_funs1
+                           }
             self.coord_fun_modules1 = torch.nn.ModuleList([
-                getattr(coord_transforms, key)(output_dim=num_coord_funs1[key])
-                for key in num_coord_funs1
+                getattr(coord_transforms, key)(output_dim=coord_funs1[key])
+                for key in coord_funs1
             ])
 
         final_filtration_activation = nn.Tanh() if tanh_filtrations else nn.Identity()
@@ -100,8 +110,7 @@ class TopologyLayer(torch.nn.Module):
 
         self.out = torch.nn.Linear(in_out_dim, features_out)
 
-
-    def compute_persistence(self, x, batch, return_filtration = False):
+    def compute_persistence(self, x, batch, return_filtration=False):
         """
         Returns the persistence pairs as a list of tensors with shape [X.shape[0],2].
         The lenght of the list is the number of filtrations.
@@ -139,7 +148,6 @@ class TopologyLayer(torch.nn.Module):
             return persistence0_new, persistence1_new, filtered_v_
         else:
             return persistence0_new, persistence1_new, None
-
 
     def compute_coord_fun(self, persistence, batch, dim1=False):
         """
@@ -185,12 +193,13 @@ class TopologyLayer(torch.nn.Module):
 
         return torch.stack(collapsed_activations)
 
-    def forward(self, x, batch, return_filtration = False):
-        #Remove the duplicate edges.
+    def forward(self, x, batch, return_filtration=False):
+        # Remove the duplicate edges.
+
         batch = remove_duplicate_edges(batch)
 
         persistences0, persistences1, filtration = self.compute_persistence(x, batch, return_filtration)
-        
+
         coord_activations = self.compute_coord_activations(
             persistences0, batch)
         if self.dim1:
