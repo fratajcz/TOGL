@@ -95,12 +95,13 @@ class TopologyLayer(torch.nn.Module):
 
         self.out = torch.nn.Linear(in_out_dim, features_out)
 
-    def compute_persistence(self, x, batch, return_filtration=False):
+    def compute_persistence(self, x, edge_index, batch, return_filtration=False):
         """
         Returns the persistence pairs as a list of tensors with shape [X.shape[0],2].
         The lenght of the list is the number of filtrations.
         """
-        edge_index = batch.edge_index
+        if edge_index is None:
+            edge_index = batch.edge_index
         if self.share_filtration_parameters:
             filtered_v_ = self.filtration_modules(x)
         else:
@@ -109,12 +110,18 @@ class TopologyLayer(torch.nn.Module):
         filtered_e_, _ = torch.max(torch.stack(
             (filtered_v_[edge_index[0]], filtered_v_[edge_index[1]])), axis=0)
 
-        vertex_slices = torch.Tensor(batch.__slices__['x']).long()
-        edge_slices = torch.Tensor(batch.__slices__['edge_index']).long()
+        if batch is None:
+            vertex_slices = x.unsqueeze(0)
+            edge_slices = edge_index.unsqueeze(0)
+            batch_index = torch.zeros_like(edge_index[0, :]).to(edge_index.device)
+        else:
+            vertex_slices = torch.Tensor(batch.__slices__['x']).long()
+            edge_slices = torch.Tensor(batch.__slices__['edge_index']).long()
+            batch_index = batch.batch
 
         if self.fake:
             return fake_persistence_computation(
-                filtered_v_, edge_index, vertex_slices, edge_slices, batch.batch)
+                filtered_v_, edge_index, vertex_slices, edge_slices, batch_index)
 
         vertex_slices = vertex_slices.cpu()
         edge_slices = edge_slices.cpu()
@@ -178,13 +185,13 @@ class TopologyLayer(torch.nn.Module):
 
         return torch.stack(collapsed_activations)
 
-    def forward(self, x, batch=None, return_filtration=False):
+    def forward(self, x, edge_index=None, batch=None, return_filtration=False):
         # Remove the duplicate edges.
 
         if batch is not None:
             batch = remove_duplicate_edges(batch)
 
-        persistences0, persistences1, filtration = self.compute_persistence(x, batch, return_filtration)
+        persistences0, persistences1, filtration = self.compute_persistence(x, edge_index, batch, return_filtration)
 
         coord_activations = self.compute_coord_activations(
             persistences0, batch)
