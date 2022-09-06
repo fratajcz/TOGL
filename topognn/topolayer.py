@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch_scatter import scatter
 
-from topognn.layers import fake_persistence_computation
+from layers import fake_persistence_computation
 from torch_persistent_homology.persistent_homology_cpu import compute_persistence_homology_batched_mt
 
-import topognn.coord_transforms as coord_transforms
+import coord_transforms as coord_transforms
 
 
 class TopologyLayer(torch.nn.Module):
@@ -44,11 +45,11 @@ class TopologyLayer(torch.nn.Module):
         self.dist_dim1 = dist_dim1
 
         self.total_num_coord_funs = np.array(
-            list(num_coord_funs.values())).sum()
+            list(self.num_coord_funs.values())).sum()
 
         self.coord_fun_modules = torch.nn.ModuleList([
-            getattr(coord_transforms, key)(output_dim=num_coord_funs[key])
-            for key in num_coord_funs
+            getattr(coord_transforms, key)(output_dim=self.num_coord_funs[key])
+            for key in self.num_coord_funs
         ])
 
         if self.dim1:
@@ -110,13 +111,14 @@ class TopologyLayer(torch.nn.Module):
             (filtered_v_[edge_index[0]], filtered_v_[edge_index[1]])), axis=0)
 
         if batch is None:
-            vertex_slices = x.unsqueeze(0)
-            edge_slices = edge_index.unsqueeze(0)
+            vertex_slices = torch.Tensor((x.shape[0],)).long()
+            edge_slices = torch.Tensor((edge_index.shape[0],)).long()
             batch_index = torch.zeros_like(edge_index[0, :]).to(edge_index.device)
-        else:
-            vertex_slices = torch.Tensor(batch.__slices__['x']).long()
-            edge_slices = torch.Tensor(batch.__slices__['edge_index']).long()
-            batch_index = batch.batch
+        #else:
+        
+        #vertex_slices = torch.Tensor(batch.__slices__['x']).long()
+        #edge_slices = torch.Tensor(batch.__slices__['edge_index']).long()
+        #batch_index = batch.batch
 
         if self.fake:
             return fake_persistence_computation(
@@ -128,10 +130,11 @@ class TopologyLayer(torch.nn.Module):
         filtered_v_ = filtered_v_.cpu().transpose(1, 0).contiguous()
         filtered_e_ = filtered_e_.cpu().transpose(1, 0).contiguous()
         edge_index = edge_index.cpu().transpose(1, 0).contiguous()
-
+        
         persistence0_new, persistence1_new = compute_persistence_homology_batched_mt(
             filtered_v_, filtered_e_, edge_index,
             vertex_slices, edge_slices)
+
         persistence0_new = persistence0_new.to(x.device)
         persistence1_new = persistence1_new.to(x.device)
 
@@ -176,6 +179,8 @@ class TopologyLayer(torch.nn.Module):
         * collapsed activations [N_graphs,d]
         """
         collapsed_activations = []
+        if len(slices) == 1:
+            slices = torch.cat((slices, torch.LongTensor((0,))))
         for el in range(len(slices)-1):
             activations_el_ = activations[slices[el]:slices[el+1]]
             mask_el = mask[slices[el]:slices[el+1]]
@@ -187,8 +192,13 @@ class TopologyLayer(torch.nn.Module):
     def forward(self, x, edge_index=None, batch=None, return_filtration=False):
         # Remove the duplicate edges.
 
-        if batch is not None:
-            batch = self.remove_duplicate_edges(batch)
+        #if batch is not None:
+        #    batch = self.remove_duplicate_edges(batch)
+
+        if batch is None:
+            edge_slices = torch.Tensor((edge_index.shape[0],)).long()
+        else:
+            edge_slices = batch.__slices__["edge_index"]
 
         persistences0, persistences1, filtration = self.compute_persistence(x, edge_index, batch, return_filtration)
 
@@ -199,8 +209,7 @@ class TopologyLayer(torch.nn.Module):
             # TODO potential save here by only computing the activation on the masked persistences
             coord_activations1 = self.compute_coord_activations(
                 persistences1, batch, dim1=True)
-            graph_activations1 = self.collapse_dim1(coord_activations1, persistence1_mask, batch.__slices__[
-                "edge_index"])  # returns a vector for each graph
+            graph_activations1 = self.collapse_dim1(coord_activations1, persistence1_mask, edge_slices)  # returns a vector for each graph
         else:
             graph_activations1 = None
 
@@ -245,3 +254,21 @@ class TopologyLayer(torch.nn.Module):
 
             batch.__slices__["edge_index"] =  new_slices     
             return batch
+
+
+if __name__ == "__main__":
+    import torch_geometric as pyg
+
+    edge_index = torch.tensor([[0, 1],
+                           [1, 0],
+                           [1, 2],
+                           [2, 1]], dtype=torch.long)
+    x = torch.tensor([[-1], [0], [1]], dtype=torch.float)
+
+    data = pyg.data.Data(x=x, edge_index=edge_index.t().contiguous())
+    data_list = [data, data]
+    loader = pyg.data.DataLoader(data_list, batch_size=2)
+    batch = next(iter(loader))
+    layer = TopologyLayer(1,1, dim1=True)
+
+    out = layer(data.x, data.edge_index)
